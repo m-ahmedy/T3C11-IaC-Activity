@@ -1,0 +1,8 @@
+{
+    "yaml.schemas": {
+        "https://raw.githubusercontent.com/awslabs/goformation/master/schema/cloudformation.schema.json": [
+            "file:///c%3A/Users/m7m9d/Desktop/T3C10-Mon-IaC/servers.yml",
+            "file:///c%3A/Users/m7m9d/Desktop/T3C10-IaC-Activity/networks.yml"
+        ]
+    }
+}

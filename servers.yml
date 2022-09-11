@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: This is a template to create the HA Servers infrastructure
+
+Parameters:
+  EnvironmentName:
+    Description: The name of the deployment
+    Type: String
+    Default: T3C11-Sunday-IaC
+
+  BucketName:
+    Type: String
+    Default: demo-website-667184564057
+
+  AmiID:
+    Type: String
+    Default: ami-052efd3df9dad4825
+
+  CPUPolicyTargetValue:
+    Type: Number
+    Default: 30
+
+  MinCapacity:
+    Type: String
+    Default: "2"
+
+  MaxCapacity:
+    Type: String
+    Default: "4"
+
+  DesiredCapacity:
+    Type: String
+    Default: "2"
+
+Resources:
+  JumpboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Jumpbox-SG"
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPC"
+      GroupDescription: Allow SSH from anywhere
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LB-SG"
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPC"
+      GroupDescription: Allow HTTP from anywhere, and HTTP to the Web Servers
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-WebServer-SG"
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPC"
+      GroupDescription: Allow SSH from JumpBox and HTTP from the ALB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref JumpboxSecurityGroup
+
+  WebServerASGLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: t2.micro
+      KeyName: t3c11-key
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      UserData: !Base64 |
+        #!/bin/bash
+        apt update -y
+        apt install apache2 -y
+
+        systemctl start apache2.service
+        systemctl enable apache2.service
+
+  WebServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref WebServerASGLaunchConfiguration
+      MaxSize: !Ref MaxCapacity
+      MinSize: !Ref MinCapacity
+      DesiredCapacity: !Ref DesiredCapacity
+
+      VPCZoneIdentifier:
+       - Fn::ImportValue: !Sub "${EnvironmentName}-Private-Subnet-1"
+       - Fn::ImportValue: !Sub "${EnvironmentName}-Private-Subnet-2"
+
+  #     TargetGroupARNs:
+
+  WebServerASGCPUScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebServerASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization 
+        TargetValue: !Ref CPUPolicyTargetValue
+
+  # ELBTargetGroup:
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     VpcId:
+  #     Port:
+  #     Protocol:
+
+  #     HealthCheckEnabled:
+  #     HealthCheckIntervalSeconds:
+  #     HealthCheckPath:
+  #     HealthCheckProtocol:
+  #     HealthCheckTimeoutSeconds:
+  #     HealthyThresholdCount:
+  #     UnhealthyThresholdCount:
+
+  # ELBLoadBalancer:
+  #   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+  #   Properties:
+  #     Subnets:
+  #     SecurityGroups:
+
+  # ELBListener:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     DefaultActions:
+  #       - Type:
+  #         TargetGroupArn:
+  #     LoadBalancerArn:
+  #     Port:
+  #     Protocol:
+
+  # ELBListenerRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties:
+  #     Actions:
+  #       - Type:
+  #         TargetGroupArn:
+  #     Conditions:
+  #       - Field:
+  #         Values:
+  #           -
+  #     ListenerArn:
+  #     Priority:
+
+  Jumpbox1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiID
+      KeyName: t3c11-key
+      SecurityGroupIds:
+        - !Ref JumpboxSecurityGroup
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-Public-Subnet-1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Jumpbox-1"
+
+Outputs:
+  Jumpbox1PublicIPAddress:
+    Description: The Public IP Address of Jumpbox 1
+    Value: !GetAtt Jumpbox1.PublicIp
+
+#   LoadBalancerDNSName:
+#     Description: DNS Name of the web application
+#     Value: !Join
+#       - ""
+#       - - "http://"
+#         - !GetAtt ELBLoadBalancer.DNSName
+#     Export:
+#       Name: !Sub ${EnvironmentName}-ELB-DNS-Name
