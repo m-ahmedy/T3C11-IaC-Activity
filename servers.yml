@@ -88,18 +88,27 @@ Resources:
       ImageId: !Ref AmiID
       InstanceType: t2.micro
       KeyName: t3c11-key
+      InstanceMonitoring: true
       SecurityGroups:
         - !Ref WebServerSecurityGroup
-      UserData: !Base64 |
-        #!/bin/bash
-        apt update -y
-        apt install apache2 -y
+      IamInstanceProfile: !Ref InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt update -y
+          apt install apache2 awscli -y
 
-        systemctl start apache2.service
-        systemctl enable apache2.service
+          systemctl start apache2.service
+          systemctl enable apache2.service
+
+          cd /var/www/html
+          aws s3 sync s3://${BucketName} .
 
   WebServerASG:
     Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
     Properties:
       LaunchConfigurationName: !Ref WebServerASGLaunchConfiguration
       MaxSize: !Ref MaxCapacity
@@ -110,7 +119,8 @@ Resources:
        - Fn::ImportValue: !Sub "${EnvironmentName}-Private-Subnet-1"
        - Fn::ImportValue: !Sub "${EnvironmentName}-Private-Subnet-2"
 
-  #     TargetGroupARNs:
+      TargetGroupARNs:
+        - !Ref ELBTargetGroup
 
   WebServerASGCPUScalingPolicy:
     Type: AWS::AutoScaling::ScalingPolicy
@@ -122,49 +132,54 @@ Resources:
           PredefinedMetricType: ASGAverageCPUUtilization 
         TargetValue: !Ref CPUPolicyTargetValue
 
-  # ELBTargetGroup:
-  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
-  #   Properties:
-  #     VpcId:
-  #     Port:
-  #     Protocol:
+  ELBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPC"
+      Port: 80
+      Protocol: HTTP
 
-  #     HealthCheckEnabled:
-  #     HealthCheckIntervalSeconds:
-  #     HealthCheckPath:
-  #     HealthCheckProtocol:
-  #     HealthCheckTimeoutSeconds:
-  #     HealthyThresholdCount:
-  #     UnhealthyThresholdCount:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
 
-  # ELBLoadBalancer:
-  #   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-  #   Properties:
-  #     Subnets:
-  #     SecurityGroups:
+  ELBLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-ALB"
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-Public-Subnet-1"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-Public-Subnet-2"
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
 
-  # ELBListener:
-  #   Type: AWS::ElasticLoadBalancingV2::Listener
-  #   Properties:
-  #     DefaultActions:
-  #       - Type:
-  #         TargetGroupArn:
-  #     LoadBalancerArn:
-  #     Port:
-  #     Protocol:
+  ELBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ELBTargetGroup
+      LoadBalancerArn: !Ref ELBLoadBalancer
+      Port: 80
+      Protocol: HTTP
 
-  # ELBListenerRule:
-  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
-  #   Properties:
-  #     Actions:
-  #       - Type:
-  #         TargetGroupArn:
-  #     Conditions:
-  #       - Field:
-  #         Values:
-  #           -
-  #     ListenerArn:
-  #     Priority:
+  ELBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ELBTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '/*'
+      ListenerArn: !Ref ELBListener
+      Priority: 1
 
   Jumpbox1:
     Type: AWS::EC2::Instance
@@ -180,16 +195,56 @@ Resources:
         - Key: Name
           Value: !Sub "${EnvironmentName}-Jumpbox-1"
 
+  EC2S3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+
+  S3AccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - !Ref EC2S3AccessRole
+      PolicyName: S3AccessPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub 'arn:aws:s3:::${BucketName}/*'
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource: !Sub 'arn:aws:s3:::${BucketName}'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2S3AccessRole
+
 Outputs:
   Jumpbox1PublicIPAddress:
     Description: The Public IP Address of Jumpbox 1
     Value: !GetAtt Jumpbox1.PublicIp
 
-#   LoadBalancerDNSName:
-#     Description: DNS Name of the web application
-#     Value: !Join
-#       - ""
-#       - - "http://"
-#         - !GetAtt ELBLoadBalancer.DNSName
-#     Export:
-#       Name: !Sub ${EnvironmentName}-ELB-DNS-Name
+  LoadBalancerDNSName:
+    Description: DNS Name of the web application
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt ELBLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}-ELB-DNS-Name
